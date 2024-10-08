@@ -1,4 +1,13 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define _XOPEN_SOURCE
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +25,16 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
-    return true;
+	if(system(cmd) == 0)
+	{
+		/* All good, child shell returned 0 */
+		return true;
+	}
+	else
+	{
+		/* Something happened */
+		return false;
+	}
 }
 
 /**
@@ -58,6 +75,33 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    int status;
+    pid_t pid;
+
+    pid = fork();
+    if (pid == -1)
+    {
+	 return -1;
+    }
+    else if (pid == 0)
+    {
+	 execv(command[0], command);
+
+	 exit (-1);
+    }
+
+    if (waitpid(pid, &status, 0) == -1)
+    {
+	 return false;
+    }
+    else if (WIFEXITED(status))
+    {
+	 if(WEXITSTATUS(status) == 0)
+	 {
+	     return true;
+	 }
+	 return false;
+    }
 
     va_end(args);
 
@@ -92,6 +136,45 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int pid;
+    int status;
+    int fd;
+
+    fd = open(outputfile, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) { perror("open"); abort(); }
+    
+    pid = fork();
+    if (pid == -1)
+    {
+         return -1;
+    }
+    else if (pid == 0)
+    {
+	 if (dup2(fd, 1) < 0) { perror("dup2"); abort(); }
+	 close(fd);
+
+         execv(command[0], command);
+
+         exit (-1);
+    }
+    else
+    {
+	 close(fd);
+    }
+
+    if (waitpid(pid, &status, 0) == -1)
+    {
+         return false;
+    }
+    else if (WIFEXITED(status))
+    {
+         if(WEXITSTATUS(status) == 0)
+         {
+             return true;
+         }
+         return false;
+
+    }
 
     va_end(args);
 
