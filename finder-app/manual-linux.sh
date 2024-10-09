@@ -83,29 +83,43 @@ ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
-cp /home/kashmir/toolchain/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 "${OUTDIR}/rootfs/lib/ld-linux-aarch64.so.1"
-cp /home/kashmir/toolchain/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libm.so.6 "${OUTDIR}/rootfs/lib64/libm.so.6"
-cp /home/kashmir/toolchain/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 "${OUTDIR}/rootfs/lib64/libresolv.so.2"
-cp /home/kashmir/toolchain/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/aarch64-none-linux-gnu/libc/lib64/libc.so.6 "${OUTDIR}/rootfs/lib64/libc.so.6"
+SYSROOT=$(${CROSS_COMPILE}gcc --print-sysroot)
+LIBS=$(${CROSS_COMPILE}readelf -a ${OUTDIR}/rootfs/bin/busybox | grep "Shared library" | awk -F'[][]' '{print $2}')
+for LIB in ${LIBS}; do
+    LIB_PATH=$(find ${SYSROOT} -name "$LIB")
+
+    if [ -n "$LIB_PATH" ]
+    then
+        cp $LIB_PATH ${OUTDIR}/rootfs/lib64/
+        cp $LIB_PATH ${OUTDIR}/rootfs/lib/
+    else
+        echo "Library $LIB not found!"
+    fi	
+done
+
+cp ${SYSROOT}/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib/
+cp ${SYSROOT}/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64
+cp ${SYSROOT}/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64
+cp ${SYSROOT}/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64
 
 # TODO: Make device nodes
 sudo mknod -m 666 dev/null c 1 3
 sudo mknod -m 600 dev/console c 5 1
 
 # TODO: Clean and build the writer utility
-cd /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app
+cd ${FINDER_APP_DIR}
 make clean
 make CROSS_COMPILE=${CROSS_COMPILE}
 
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/writer.elf "${OUTDIR}/rootfs/home/"
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/finder.sh "${OUTDIR}/rootfs/home/"
+cp ${FINDER_APP_DIR}/writer.elf "${OUTDIR}/rootfs/home/"
+cp ${FINDER_APP_DIR}/finder.sh "${OUTDIR}/rootfs/home/"
 mkdir "${OUTDIR}/rootfs/home/conf"
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/conf/assignment.txt "${OUTDIR}/rootfs/home/conf/"
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/conf/username.txt "${OUTDIR}/rootfs/home/conf/"
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/autorun-qemu.sh "${OUTDIR}/rootfs/home/"
-cp /home/kashmir/Documents/ecea5305/assignment-1-fbt-cu/finder-app/finder-test.sh "${OUTDIR}/rootfs/home/"
+cp ${FINDER_APP_DIR}/conf/assignment.txt "${OUTDIR}/rootfs/home/conf/"
+cp ${FINDER_APP_DIR}/conf/username.txt "${OUTDIR}/rootfs/home/conf/"
+cp ${FINDER_APP_DIR}/autorun-qemu.sh "${OUTDIR}/rootfs/home/"
+cp ${FINDER_APP_DIR}/finder-test.sh "${OUTDIR}/rootfs/home/"
 
 # TODO: Chown the root directory
 cd "${OUTDIR}/rootfs"
