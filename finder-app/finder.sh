@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # arguments
 filesdir=$1
