@@ -455,7 +455,6 @@ int main(int argc, char **argv)
     client_addr_size = sizeof(client_addr); // Initialize client address size
 
     //Create timer thread
-	/*
         pthread_t TimerthreadId;
         ThreadArgs *timerargs = malloc(sizeof(ThreadArgs));
         if (timerargs == NULL)
@@ -473,7 +472,6 @@ int main(int argc, char **argv)
             }
 
         }
-	*/
 
     while (!exit_main_loop)
     {
