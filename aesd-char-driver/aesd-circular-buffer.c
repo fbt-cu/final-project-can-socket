@@ -15,6 +15,7 @@
 #endif
 
 #include "aesd-circular-buffer.h"
+#include <stdio.h>
 
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
@@ -32,7 +33,35 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     /**
     * TODO: implement per description
     */
-    return NULL;
+
+    size_t l_char_offset = char_offset;
+    size_t acc = 0;
+    uint8_t i = buffer->out_offs;
+    uint8_t max = 0;
+
+    while(l_char_offset >= acc)
+    {
+        // printf("acc:%ld char_offset:%ld i:%d\n", acc, l_char_offset, i);
+        if(max >= (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED))
+        {
+            // there is no data in this position of the buffer, return NULL
+            // printf("Index out of bounds!\n");
+            return NULL;
+        }
+        if(i >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+        {
+            i = 0;
+        }
+        acc += buffer->entry[i].size;
+        i++;
+        max++;
+    }
+    // when acc > l_char_offset, we have gone past the specified offset, we need to roll back an iteration
+    i--;
+    acc -= buffer->entry[i].size;
+    // printf("data:%s", buffer->entry[i].buffptr);
+    *entry_offset_byte_rtn = l_char_offset - acc;
+    return &buffer->entry[i];
 }
 
 /**
@@ -47,6 +76,41 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
     /**
     * TODO: implement per description
     */
+
+    // add the entry to the buffer
+    buffer->entry[buffer->in_offs] = *add_entry;
+    // printf("Added entry to circular buffer. in_offs:%d data:%s, size:%ld\n", buffer->in_offs, buffer->entry[buffer->in_offs].buffptr, buffer->entry[buffer->in_offs].size);
+
+    // increase the in offset, perform overflow check
+    buffer->in_offs++;
+    if(buffer->in_offs >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+    {
+        // in offset has reached the end of the circular buffer, roll back to the first position
+        buffer->in_offs = 0;
+    }
+
+    // check if the buffer is full
+    if (buffer->full == true)
+    {
+        // Buffer was full, increase out offset with overflow check, in offset was already increased
+        buffer->out_offs++;
+        if(buffer->out_offs >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
+        {
+            // out offset has reached the end of the circular buffer, roll back to the first position
+            buffer->out_offs = 0;
+        }
+        // printf("Buffer full -> in_offs:%d out_offs:%d\n", buffer->in_offs, buffer->out_offs);
+    }
+    else
+    {
+        // buffer was not full, check if buffer is now full
+        if(buffer->in_offs == buffer->out_offs)
+        {
+            // buffer is full, set full flag
+            buffer->full = true;
+            // printf("Buffer is now full!\n");
+        }
+    }
 }
 
 /**
