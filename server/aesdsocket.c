@@ -24,8 +24,16 @@
 #include <sys/queue.h>
 #include <time.h>
 
-#define SOCKETDATA_FILE "/var/tmp/aesdsocketdata"
 #define CLIENT_BUFFER_LEN 1024
+
+#define USE_AESD_CHAR_DEVICE 1
+int sockfd;
+#ifndef USE_AESD_CHAR_DEVICE
+#define SOCKETDATA_FILE "/var/tmp/aesdsocketdata"
+#else
+#define SOCKETDATA_FILE "/dev/aesdchar"
+#endif
+
 FILE *tmp_file = NULL;
 bool exit_main_loop = false;
 typedef struct
@@ -325,6 +333,16 @@ void *thread_function(void *args)
 {
     ThreadArgs *threadArgs = (ThreadArgs *)args;
     char client_ip[INET_ADDRSTRLEN];
+
+    pthread_mutex_lock(&file_mutex);
+    threadArgs->file_fd = open(SOCKETDATA_FILE, O_RDWR | O_CREAT | O_TRUNC, 0666);
+    if (threadArgs->file_fd == -1)
+    {
+        syslog(LOG_ERR, "Open/create of /var/tmp/aesdsocketdata failed");
+        pthread_exit(NULL);
+    }
+    pthread_mutex_unlock(&file_mutex); 
+
     // Convert binary IP address from binary to human readable format
 
     if (threadArgs->socket_addr.ss_family == AF_INET)
@@ -354,6 +372,10 @@ void *thread_function(void *args)
     {
         syslog(LOG_ERR, "Closing of connection from %s failed", client_ip);
     }
+    
+    pthread_mutex_lock(&file_mutex);
+    close(threadArgs->file_fd);
+    pthread_mutex_unlock(&file_mutex); 
     // Exit from the thread
     pthread_exit(NULL);
 }
@@ -443,18 +465,12 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    file_fd = open(SOCKETDATA_FILE, O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (file_fd == -1)
-    {
-        syslog(LOG_ERR, "Open/create of /var/tmp/aesdsocketdata failed");
-        freeaddrinfo(server_info); // free the linked-list
-        closelog();                // Close syslog
-        exit(1);
-    }
+    
     initialize_sigaction();
     client_addr_size = sizeof(client_addr); // Initialize client address size
 
     //Create timer thread
+    #ifndef USE_AESD_CHAR_DEVICE
         pthread_t TimerthreadId;
         ThreadArgs *timerargs = malloc(sizeof(ThreadArgs));
         if (timerargs == NULL)
@@ -472,6 +488,7 @@ int main(int argc, char **argv)
             }
 
         }
+    #endif
 
     while (!exit_main_loop)
     {
@@ -505,7 +522,6 @@ int main(int argc, char **argv)
     }
     // Wait for active threads to finish
     wait_for_all_threads_to_join();
-    close(file_fd);
     freeaddrinfo(server_info); // free the linked-list
     closelog();                // Close syslog
 }
