@@ -29,6 +29,7 @@
 #define CLIENT_BUFFER_LEN 1024
 
 bool exit_main_loop = false;
+
 typedef struct
 {
     int client_fd;
@@ -36,16 +37,26 @@ typedef struct
     struct sockaddr_storage socket_addr;
 } ThreadArgs;
 
+typedef struct
+{
+    int can_s;
+    int port;
+} ListenerThreadArgs;
+
 typedef struct thread_Node
 {
     pthread_t thread_id;
     int client_fd;
+    int alive;
     SLIST_ENTRY(thread_Node) entry;
 }thread_Node;
 
 // Define the head of the list
 SLIST_HEAD(ThreadList, thread_Node) head = SLIST_HEAD_INITIALIZER(head);
 
+// Global mutex for synchronizing access to print
+///TODO: this mutex might not be really needed, for now is for debugging purposes
+pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Global mutex for synchronizing access to the file
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Global mutex for synchronizing access to the thread nodes
@@ -61,6 +72,7 @@ void add_thread_node(pthread_t thread_id, int client_fd)
    }
    new_thread_node->thread_id = thread_id;
    new_thread_node->client_fd = client_fd;
+   new_thread_node->alive = 1;
    pthread_mutex_lock(&thread_list_mutex);
    syslog(LOG_INFO,"Inserting thread node");
    SLIST_INSERT_HEAD(&head,new_thread_node,entry);
@@ -76,6 +88,7 @@ void wait_for_all_threads_to_join()
     while((current_thread_node != NULL))
     {
         next_thread_node = SLIST_NEXT(current_thread_node,entry);
+        pthread_kill(current_thread_node->thread_id, SIGINT);
         if(pthread_join(current_thread_node->thread_id,NULL)==0)
         {
             syslog(LOG_INFO,"Removing the thread node");
@@ -197,126 +210,53 @@ void initialize_sigaction()
     }
 }
 
-int receive_and_store_socket_data(int client_fd, int file_fd)
-{
-    char *client_buffer = NULL;
-    size_t total_received = 0;
-    size_t current_size = CLIENT_BUFFER_LEN;
-    size_t multiplication_factor = 1;
-    struct aesd_seekto seek_to; // Struct for AESDCHAR_IOCSEEKTO
-
-    // Dynamically allocate initial buffer
-    client_buffer = (char *)calloc(current_size, sizeof(char));
-    if (client_buffer == NULL)
-    {
-        syslog(LOG_ERR, "Client buffer allocation failed, returning with error");
-        return -1;
-    }
-
-    while (true)
-    {
-        // Receive data from client
-        ssize_t received_no_of_bytes = recv(client_fd, client_buffer + total_received, current_size - total_received - 1, 0);
-        if (received_no_of_bytes <= 0)
-        {
-            break; // Connection closed or error
-        }
-        total_received += received_no_of_bytes;
-        client_buffer[total_received] = '\0'; // Null-terminate the string
-
-        // Check for newline
-        if (strchr(client_buffer, '\n') != NULL)
-        {
-            break; // Newline found, exit the loop
-        }
-
-        // If we reach this point, we need to resize the buffer
-        multiplication_factor <<= 1;
-        size_t new_size = multiplication_factor * CLIENT_BUFFER_LEN;
-        char *new_buffer = (char *)realloc(client_buffer, new_size);
-        if (new_buffer == NULL)
-        {
-            syslog(LOG_ERR, "Reallocation of client buffer failed, returning with error");
-            free(client_buffer);
-            return -1;
-        }
-        client_buffer = new_buffer;
-        current_size = new_size;
-    }
-
-    // Now we have the complete data, store it in the file
-    syslog(LOG_INFO, "Writing received data to the sockedata file");
-    // Lock the mutex before writing to the file
-    pthread_mutex_lock(&file_mutex);
-    if (write(file_fd, client_buffer, total_received) != -1)
-    {
-        syslog(LOG_INFO, "Syncing data to the disk");
-        fdatasync(file_fd);
-    }
-    else
-    {
-        syslog(LOG_ERR, "Writing received data to the socketdata file failed");
-        pthread_mutex_unlock(&file_mutex); //Unlock mutex before returning from function
-        free(client_buffer);
-        return -1;
-    }
-    // UnLock the mutex after writing to the file
-    pthread_mutex_unlock(&file_mutex);
-    syslog(LOG_INFO, "Unlocked mutex and returning from write");
-    free(client_buffer);
-    return 0; // Return success
-}
-
-int return_socketdata_to_client(int client_fd, int file_fd)
-{
-    char *send_buffer;
-    size_t bytes_read;
-    lseek(file_fd, 0, SEEK_SET);
-    send_buffer = (char *)malloc(CLIENT_BUFFER_LEN);
-    if (send_buffer == NULL)
-    {
-        syslog(LOG_INFO, "Client buffer was not allocated hence returning with error");
-        return -1;
-    }
-
-
-    // Lock the mutex while reading from the file
-    pthread_mutex_lock(&file_mutex);
-    // Read and send data
-    while ((bytes_read = read(file_fd, send_buffer, sizeof(send_buffer) - 1)) > 0)
-    {
-       
-        send_buffer[bytes_read] = '\0';
-        syslog(LOG_ERR, "Send to client is: %s", send_buffer);
-        // Send to client
-        if (send(client_fd, send_buffer, bytes_read, 0) == -1)
-        {
-            syslog(LOG_ERR, "Send to client failed: %s", strerror(errno));
-            break;
-        }
-    }
-    //Unlock the mutex after reading from file
-    pthread_mutex_unlock(&file_mutex); 
-    syslog(LOG_INFO, "Unlocked the mutex and returning from send routine");
-    free(send_buffer);
-    return 0;
-}
-
 void *thread_can_send_to_sockets(void *args)
 {
-    ThreadArgs *threadArgs = (ThreadArgs *)args;
+    ListenerThreadArgs *threadArgs = (ListenerThreadArgs *)args;
     struct can_frame frame;
     int nbytes;
+    struct sockaddr_can addr;
+    struct ifreq ifr;
+    socklen_t len = sizeof(addr);
+    char send_str[58];
 
     // Log the creation of this thread
-    syslog(LOG_INFO, "Created can send to sockets thread.");
+    syslog(LOG_INFO, "Created can%d send to sockets thread.", threadArgs->port);
 
-    // Read CAN frame (block if none available)
-    nbytes = read(threadArgs->can0_s, &frame, sizeof(frame));
-    if(nbytes > 0)
+    while(!exit_main_loop)
     {
-        // we received data
-        /// TODO: Go through linked list and send the can data (formatted) 
+        // Read CAN frame (block if none available)
+        nbytes = recvfrom(threadArgs->can_s, &frame, sizeof(frame), 0, (struct sockaddr*)&addr, &len);
+        if(nbytes > 0)
+        {
+            // we received data
+            ifr.ifr_ifindex = addr.can_ifindex;
+            ioctl(threadArgs->can_s, SIOCGIFNAME, &ifr);
+
+            sprintf(send_str, "%s rx %03X %hhd %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX\n", ifr.ifr_name, frame.can_id, frame.can_dlc, 
+            frame.data[0], frame.data[1], frame.data[2], frame.data[3], frame.data[4], frame.data[5], frame.data[6], frame.data[7]);
+        
+            syslog(LOG_INFO, "%s", send_str);
+
+            thread_Node* current_thread_node = SLIST_FIRST(&head);
+            thread_Node* next_thread_node;
+            pthread_mutex_lock(&thread_list_mutex);
+            while((current_thread_node != NULL))
+            {
+                next_thread_node = SLIST_NEXT(current_thread_node,entry);
+                if(current_thread_node->alive)
+                {
+                    if (send(current_thread_node->client_fd, send_str, 38, 0) == -1)
+                    {
+                        syslog(LOG_ERR, "Send to client failed: %s", strerror(errno));
+                        break;
+                    }
+                }
+                current_thread_node = next_thread_node;
+            }
+            pthread_mutex_unlock(&thread_list_mutex);
+
+        }
     }
 }
 
@@ -324,6 +264,13 @@ void *thread_function(void *args)
 {
     ThreadArgs *threadArgs = (ThreadArgs *)args;
     char client_ip[INET_ADDRSTRLEN];
+    struct can_frame frame;
+    int nbytes;
+    pthread_t self;
+
+    self = pthread_self();
+
+    memset(&frame, 0, sizeof(struct can_frame));
     // Convert binary IP address from binary to human readable format
 
     if (threadArgs->socket_addr.ss_family == AF_INET)
@@ -340,12 +287,50 @@ void *thread_function(void *args)
     // Log the client ip
     syslog(LOG_INFO, "Accepted connection from %s", client_ip);
 
-    // Receive packets from the client and store in SOCKETDATA_FILE
-    if (receive_and_store_socket_data(threadArgs->client_fd, threadArgs->can0_s) == 0)
+    // start receiving command from connection
+    while(!exit_main_loop)
     {
-        // Send back the stored data of file back to the client
-        syslog(LOG_INFO, "Sending back the received data to client");
-        return_socketdata_to_client(threadArgs->client_fd, threadArgs->can0_s);
+        char rec_cmd[35];
+        char close[6];
+        char rest[29];
+        int port;
+        int socket;
+        // can1 123 8 01 02 03 04 05 06 07 08
+        nbytes = recv(threadArgs->client_fd, rec_cmd, 35, 0);
+        if(nbytes <= 0)
+        {
+            // interrupted
+            break;
+        }
+
+        sscanf(rec_cmd, "%s %s", close, rest);
+        if(strcmp(close, "close") == 0)
+        {
+            // close connection
+            break;
+        }
+
+        sscanf(rec_cmd, "can%d %X %hhd %hhX %hhX %hhX %hhX %hhX %hhX %hhX %hhX\n", &port, &frame.can_id, &frame.can_dlc, 
+        &frame.data[0], &frame.data[1], &frame.data[2], &frame.data[3], &frame.data[4], &frame.data[5], &frame.data[6], &frame.data[7]);
+        
+        if(port == 0)
+        {
+            socket = threadArgs->can0_s;
+        }
+        else if(port == 1)
+        {
+            socket = threadArgs->can1_s;
+        }
+        else
+        {
+            syslog(LOG_ERR, "Selected CAN port does not exist");
+
+        }
+
+        nbytes = write(socket, &frame, sizeof(frame)); 
+        if(nbytes != sizeof(frame)) {
+            syslog(LOG_ERR, "Error sending frame to can port can%d", port);
+        }
     }
 
     if (close(threadArgs->client_fd) == 0)
@@ -356,6 +341,27 @@ void *thread_function(void *args)
     {
         syslog(LOG_ERR, "Closing of connection from %s failed", client_ip);
     }
+
+    if(exit_main_loop)
+    {
+        // we were signaled to exit, no need to set the alive value to 0, just return from here
+        return 0;
+    }
+
+    thread_Node* current_thread_node = SLIST_FIRST(&head);
+    thread_Node* next_thread_node;
+    pthread_mutex_lock(&thread_list_mutex);
+    while((current_thread_node != NULL))
+    {
+        next_thread_node = SLIST_NEXT(current_thread_node,entry);
+        if(pthread_equal(current_thread_node->thread_id,self)!=0)
+        {
+            current_thread_node->alive = 0;
+            break;
+        }
+        current_thread_node = next_thread_node;
+    }
+    pthread_mutex_unlock(&thread_list_mutex);
 
     // Exit from the thread
     return 0;
@@ -490,6 +496,53 @@ int main(int argc, char **argv)
         exit(1);
     }
 
+    ///TODO: Maybe we need loopback, maybe not, for now we will disable it
+    // Disable loopback 
+    int loopback = 0;
+    int setsockopt_ret;
+    setsockopt_ret = setsockopt(can0_s, SOL_CAN_RAW, CAN_RAW_LOOPBACK, &loopback, sizeof(loopback));
+    syslog(LOG_INFO, "Set socket option loopback to %d in port can0. Result: %d", loopback, setsockopt_ret);
+    setsockopt_ret = setsockopt(can1_s, SOL_CAN_RAW, CAN_RAW_LOOPBACK, &loopback, sizeof(loopback));
+    syslog(LOG_INFO, "Set socket option loopback to %d in port can1. Result: %d", loopback, setsockopt_ret);
+    setsockopt_ret = setsockopt(can0_s, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &loopback, sizeof(loopback));
+    syslog(LOG_INFO, "Set socket option receive own messages to %d in port can0. Result: %d", loopback, setsockopt_ret);
+    setsockopt_ret = setsockopt(can1_s, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &loopback, sizeof(loopback));
+    syslog(LOG_INFO, "Set socket option receive own messages to %d in port can1. Result: %d", loopback, setsockopt_ret);
+
+    // Create and launch CAN0 listener thread (thread_can_send_to_sockets)
+    pthread_t threadListener0Id;
+    ListenerThreadArgs *argsListener0 = malloc(sizeof(ListenerThreadArgs));
+    if (argsListener0 == NULL)
+    {
+        syslog(LOG_ERR, "Failed to allocate memory for CAN0 listener thread arguments");
+    }
+    // Use can0 socket
+    argsListener0->can_s = can0_s;
+    argsListener0->port = 0;
+    syslog(LOG_INFO, "Creating can0 listener thread");
+    if (pthread_create(&threadListener0Id, NULL, thread_can_send_to_sockets, (void *)argsListener0) != 0)
+    {
+        syslog(LOG_ERR, "Error creating can0 listener thread");
+        free(argsListener0);
+    }
+
+    // Create and launch CAN1 listener thread (thread_can_send_to_sockets)
+    pthread_t threadListener1Id;
+    ListenerThreadArgs *argsListener1 = malloc(sizeof(ListenerThreadArgs));
+    if (argsListener1 == NULL)
+    {
+        syslog(LOG_ERR, "Failed to allocate memory for CAN1 listener thread arguments");
+    }
+    // Use can1 socket
+    argsListener1->can_s = can1_s;
+    argsListener1->port = 1;
+    syslog(LOG_INFO, "Creating can1 listener thread");
+    if (pthread_create(&threadListener1Id, NULL, thread_can_send_to_sockets, (void *)argsListener1) != 0)
+    {
+        syslog(LOG_ERR, "Error creating can1 listener thread");
+        free(argsListener1);
+    }
+
     // Main server loop
     while (!exit_main_loop)
     {
@@ -532,6 +585,10 @@ int main(int argc, char **argv)
     // Clean up before exiting
     syslog(LOG_ERR, "Waiting for active threads to join");
     wait_for_all_threads_to_join();
+    pthread_kill(threadListener0Id, SIGINT);
+    pthread_kill(threadListener1Id, SIGINT);
+    pthread_join(threadListener0Id, NULL);
+    pthread_join(threadListener1Id, NULL);
 
     close(can0_s);
     close(can1_s);
